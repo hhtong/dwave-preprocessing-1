@@ -59,6 +59,7 @@ setup(
     include_dirs=[
         numpy.get_include(),
         dimod.get_include(),
+        'dwave/preprocessing/include/dwave-preprocessing/'
         ],
     install_requires=[
         'numpy>=1.17.3,<2.0.0',  # keep synced with circle-ci, pyproject.toml

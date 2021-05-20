@@ -4,6 +4,147 @@ orbs:
   win: circleci/windows@2.2.0
 
 jobs:
+
+  #
+  # linux
+  #
+
+  build-manylinux:
+    parameters:
+      python-minor:
+        type: integer
+      architecture:
+        type: string
+
+    docker:
+      - image: quay.io/pypa/manylinux1_<< parameters.architecture >>
+
+    working_directory: /dwave/preprocessing
+
+    steps:
+      - checkout
+
+      - run:
+          name: fix git checkout
+          command: git reset --hard
+
+      - run:
+          name: build wheels
+          command: |
+            for PYBIN in /opt/python/*/bin; do
+              if "${PYBIN}/python" -c "import sys; sys.exit(sys.version_info.major == 3)"; then continue; fi;
+              if "${PYBIN}/python" -c "import sys; sys.exit(sys.version_info.minor == << parameters.python-minor >>)"; then continue; fi;
+              "${PYBIN}/pip" install -r requirements.txt --only-binary=:all:
+              "${PYBIN}/pip" wheel . -w ./wheelhouse
+            done
+
+      - run:
+          name: bundle shared libraries into wheels
+          command: |
+            for whl in ./wheelhouse/dwave_preprocessing*.whl; do
+              auditwheel repair "$whl" -w ./dist
+            done
+
+      - store_artifacts:
+          path: ./dist
+
+      - persist_to_workspace:
+          root: /dwave/preprocessing/dist/
+          paths: .
+
+  build-sdist:
+    docker:
+      - image: circleci/python:3.9-buster
+
+    working_directory: ~/build
+
+    steps:
+      - checkout
+
+      - run:
+          name: build sdist
+          command: |
+            python -m virtualenv build_env
+            . build_env/bin/activate
+            pip install -r requirements.txt
+            python setup.py sdist
+
+      - run:
+          name: test installing from sdist without cython
+          command: |
+            python -m virtualenv env_sdist
+            . env_sdist/bin/activate
+            pip install dist/dwave-preprocessing*.tar.gz
+
+      - run:
+          name: install sdist with cython
+          command: |
+            python -m virtualenv env_cython_sdist
+            . env_cython_sdist/bin/activate
+            pip install cython
+            pip install dist/dwave-preprocessing*.tar.gz
+
+      - store_artifacts:
+          path: ./dist
+
+      - persist_to_workspace:
+          root: ~/build/dist/
+          paths: .
+
+  test-linux:
+    parameters:
+      image:
+        type: string
+
+    docker:
+      - image: circleci/python:<< parameters.image >>
+
+    steps:
+      - checkout
+
+      - attach_workspace:
+          at: dist
+
+      # Make sure that we're using the built package and not one from pypi
+      - run:
+          name: install
+          command: |
+            python -m virtualenv env
+            . env/bin/activate
+            pip install -r requirements.txt
+            pip install -r tests/requirements.txt
+            pip install dwave-preprocessing --no-index -f dist/ --no-deps --force-reinstall
+
+      - run:
+          name: run tests
+          command: |
+            . env/bin/activate
+            cd tests/
+            python -m unittest
+
+  deploy-linux:
+    docker:
+      - image: circleci/python:3.9-buster
+
+    steps:
+      - attach_workspace:
+          at: dist
+
+      - store_artifacts:
+          path: ./dist
+
+      - run:
+          name: deploy
+          command: |
+            python -m virtualenv env
+            . env/bin/activate
+            python -m pip install twine
+            twine upload -u $PYPI_USERNAME -p $PYPI_PASSWORD --skip-existing ./dist/*
+
+  #
+  # osx
+  #
+
   test-osx:
     parameters:
       python-version:
@@ -121,6 +262,10 @@ jobs:
             python -m pip install twine
             twine upload -u $PYPI_USERNAME -p $PYPI_PASSWORD --skip-existing ./dist/*
 
+  #
+  # win
+  #
+
   test-win:
     parameters:
       python-version:
@@ -211,78 +356,113 @@ jobs:
   # cpp tests
   #
 
-  # test-linux-cpp11:
-  #   docker:
-  #     # just use a python image, all we really want is debian
-  #     - image: circleci/python:3.8-buster
+  test-linux-cpp11:
+    docker:
+      # just use a python image, all we really want is debian
+      - image: circleci/python:3.8-buster
     
-  #   working_directory: ~/repo
+    working_directory: ~/repo
 
-  #   steps:
-  #     - checkout
+    steps:
+      - checkout
 
-  #     - restore_cache: *restore-cache-env
+      - restore_cache: &restore-cache-env
+          key: v2-dependencies-{{ checksum "requirements.txt" }}-{{ checksum "tests/requirements.txt" }}-{{ checksum "docs/requirements.txt" }}-{{ .Environment.CIRCLE_JOB }}
+      
+      - run: &create-virtualenv
+          name: Create virtual environment
+          command: |
+            python -m pip install virtualenv
+            python -m virtualenv env
 
-  #     - run: *create-virtualenv
+      - run: &install-requirements
+          name: Install requirements
+          command: |
+            . env/bin/activate
+            pip install -r requirements.txt -r tests/requirements.txt -r docs/requirements.txt
+            pip install wheel twine
 
-  #     - run: *install-requirements
+      - save_cache: &save-cache-env
+          key: v2-dependencies-{{ checksum "requirements.txt" }}-{{ checksum "tests/requirements.txt" }}-{{ checksum "docs/requirements.txt" }}-{{ .Environment.CIRCLE_JOB }}
+          paths:
+            - env
 
-  #     - save_cache: *save-cache-env
-
-  #     - run:
-  #         name: run cpp tests
-  #         command: |
-  #           . env/bin/activate
-  #           make -C testscpp/ --always-make
+      - run:
+          name: run cpp tests
+          command: |
+            . env/bin/activate
+            make -C testscpp/ --always-make
 
   #
   # docs
   #
 
-  # test-docs:
-  #   docker:
-  #     - image: circleci/python:3.7
+  test-docs:
+    docker:
+      - image: circleci/python:3.7
 
-  #   steps:
-  #     - checkout
+    steps:
+      - checkout
 
-  #     - restore_cache: *restore-cache-env
+      - restore_cache: *restore-cache-env
 
-  #     - run: *create-virtualenv
+      - run: *create-virtualenv
 
-  #     - run:
-  #         name: install doxygen
-  #         command: sudo apt-get install doxygen
+      - run:
+          name: install doxygen
+          command: sudo apt-get install doxygen
 
-  #     - run: *install-requirements
+      - run: *install-requirements
 
-  #     - save_cache: *save-cache-env
+      - save_cache: *save-cache-env
 
-  #     - run: *build-extension
+      - run: &build-extension
+          name: Build extension
+          command: env/bin/python setup.py build_ext --inplace
 
-  #     - run:
-  #         name: Install package
-  #         command: env/bin/pip install .
+      - run:
+          name: Install package
+          command: env/bin/pip install .
 
-  #     - run: &build-docs
-  #         name: Build docs
-  #         command: |
-  #           . env/bin/activate
-  #           make -C docs/ cpp html
+      - run: &build-docs
+          name: Build docs
+          command: |
+            . env/bin/activate
+            make -C docs/ cpp html
 
-  #     - store_artifacts: &save-docs
-  #         path: ./docs/build/html
+      - store_artifacts: &save-docs
+          path: ./docs/build/html
 
-  #     - run: &run-doctest
-  #         name: Test docs
-  #         command: |
-  #           . env/bin/activate
-  #           make -C docs/ doctest
+      - run: &run-doctest
+          name: Test docs
+          command: |
+            . env/bin/activate
+            make -C docs/ doctest
 
 workflows:
-  version: 2
   test:
     jobs:
+      - build-manylinux:
+          name: build-manylinux1_<< matrix.architecture >>-py3<< matrix.python-minor >>
+          matrix:
+            parameters:
+              python-minor: [6, 7, 8, 9]
+              # We could build for 32bit as well, but since we don't have any
+              # way to test it and it slows down compilation, we don't for
+              # now.
+              architecture: ["x86_64"]
+      - test-linux:
+          requires:
+            - build-manylinux
+          matrix:
+            parameters:
+              # We could make the second numpy version unbounded, but for now
+              # let's pin it for reproducability
+              image:
+                - 3.9-buster
+                - 3.8-buster
+                - 3.7-stretch
+                - 3.6-jessie
       - test-osx:
           matrix:
             parameters:
@@ -292,11 +472,38 @@ workflows:
             parameters:
               python-version: ["3.6.8", "3.7.5", "3.8.6", "3.9.0"]
               architecture: ["", "x86"]
-      # - test-linux-cpp11
-      # - test-docs
+      - build-sdist
+      - test-linux-cpp11
+      - test-docs
 
   deploy:
     jobs:
+      - build-manylinux:
+          filters:
+            tags:
+              only: /^[0-9]+(\.[0-9]+)*((\.dev|rc)([0-9]+)?)?$/
+            branches:
+              ignore: /.*/
+          name: build-manylinux1_<< matrix.architecture >>-py3<< matrix.python-minor >>
+          matrix:
+            parameters:
+              python-minor: [6, 7, 8, 9]
+              architecture: ["x86_64", "i686"]
+      - build-sdist:
+          filters:
+            tags:
+              only: /^[0-9]+(\.[0-9]+)*((\.dev|rc)([0-9]+)?)?$/
+            branches:
+              ignore: /.*/
+      - deploy-linux:
+          filters:
+            tags:
+              only: /^[0-9]+(\.[0-9]+)*((\.dev|rc)([0-9]+)?)?$/
+            branches:
+              ignore: /.*/
+          requires:
+            - build-manylinux
+            - build-sdist
       - deploy-osx:
           filters:
             tags:
